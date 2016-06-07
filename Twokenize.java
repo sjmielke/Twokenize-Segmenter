@@ -26,14 +26,15 @@ import org.apache.commons.lang.StringEscapeUtils;
  * (3) Brendan bugfixed the Scala port and merged with POS-specific changes
  *     for the CMU ARK Twitter POS Tagger  
  * (4) Tobi Owoputi ported it back to Java and added many improvements (2012-06)
+ * (5) Sebastian Mielke made it unicode-aware (2016-05)
  * 
- * Current home is http://github.com/brendano/ark-tweet-nlp and http://www.ark.cs.cmu.edu/TweetNLP
+ * Original home is http://github.com/brendano/ark-tweet-nlp and http://www.ark.cs.cmu.edu/TweetNLP
  *
  * There have been at least 2 other Java ports, but they are not in the lineage for the code here.
  */
 public class Twokenize {
-    static Pattern Contractions = Pattern.compile("(?i)(\\w+)(n['’′]t|['’′]ve|['’′]ll|['’′]d|['’′]re|['’′]s|['’′]m)$");
-    static Pattern Whitespace = Pattern.compile("[\\s\\p{Zs}]+");
+    static Pattern Contractions = Pattern.compile("(?i)(\\w+)(n['’′]t|['’′]ve|['’′]ll|['’′]d|['’′]re|['’′]s|['’′]m)$", Pattern.UNICODE_CHARACTER_CLASS);
+    static Pattern Whitespace = Pattern.compile("[\\s\\p{Zs}]+", Pattern.UNICODE_CHARACTER_CLASS);
 
     static String punctChars = "['\"“”‘’.?!…,:;]"; 
     //static String punctSeq   = punctChars+"+";	//'anthem'. => ' anthem '.
@@ -71,7 +72,7 @@ public class Twokenize {
     // Abbreviations
     static String boundaryNotDot = "(?:$|\\s|[“\\u0022?!,:;]|" + entity + ")";
     static String aa1  = "(?:[A-Za-z]\\.){2,}(?=" + boundaryNotDot + ")";
-    static String aa2  = "[^A-Za-z](?:[A-Za-z]\\.){1,}[A-Za-z](?=" + boundaryNotDot + ")";
+    static String aa2  = "[^\\p{Alpha}](?:[\\p{Alpha}]\\.){1,}[\\p{Alpha}](?=" + boundaryNotDot + ")";
     static String standardAbbreviations = "\\b(?:[Mm]r|[Mm]rs|[Mm]s|[Dd]r|[Ss]r|[Jj]r|[Rr]ep|[Ss]en|[Ss]t)\\.";
     static String arbitraryAbbrev = "(?:" + aa1 +"|"+ aa2 + "|" + standardAbbreviations + ")";
     static String separators  = "(?:--+|―|—|~|–|=)";
@@ -147,15 +148,15 @@ public class Twokenize {
 
     // This also gets #1 #40 which probably aren't hashtags .. but good as tokens.
     // If you want good hashtag identification, use a different regex.
-    static String Hashtag = "#[a-zA-Z0-9_]+";  //optional: lookbehind for \b
+    static String Hashtag = "#[\\w]+";  //optional: lookbehind for \b
     //optional: lookbehind for \b, max length 15
-    static String AtMention = "[@＠][a-zA-Z0-9_]+"; 
+    static String AtMention = "[@＠][\\w]+"; 
 
     // I was worried this would conflict with at-mentions
     // but seems ok in sample of 5800: 7 changes all email fixes
     // http://www.regular-expressions.info/email.html
     static String Bound = "(?:\\W|^|$)";
-    public static String Email = "(?<=" +Bound+ ")[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,4}(?=" +Bound+")";
+    public static String Email = "(?<=" +Bound+ ")[\\w.%+-]+@[\\p{Alpha}0-9.-]+\\.[\\p{Alpha}]{2,4}(?=" +Bound+")";
 
     // We will be tokenizing using these regexps as delimiters
     // Additionally, these things are "protected", meaning they shouldn't be further split themselves.
@@ -178,7 +179,7 @@ public class Twokenize {
                     embeddedApostrophe,
                     Hashtag,  
                     AtMention
-            ));
+            ), Pattern.UNICODE_CHARACTER_CLASS);
 
     // Edge punctuation
     // Want: 'foo' => ' foo '
@@ -191,10 +192,10 @@ public class Twokenize {
     // Note the 'smart quotes' (http://en.wikipedia.org/wiki/Smart_quotes)
     static String edgePunctChars    = "'\"“”‘’«»{}\\(\\)\\[\\]\\*&"; //add \\p{So}? (symbols)
     static String edgePunct    = "[" + edgePunctChars + "]";
-    static String notEdgePunct = "[a-zA-Z0-9]"; // content characters
+    static String notEdgePunct = "[\\p{Alpha}0-9]"; // content characters
     static String offEdge = "(^|$|:|;|\\s|\\.|,)";  // colon here gets "(hello):" ==> "( hello ):"
-    static Pattern EdgePunctLeft  = Pattern.compile(offEdge + "("+edgePunct+"+)("+notEdgePunct+")");
-    static Pattern EdgePunctRight = Pattern.compile("("+notEdgePunct+")("+edgePunct+"+)" + offEdge);
+    static Pattern EdgePunctLeft  = Pattern.compile(offEdge + "("+edgePunct+"+)("+notEdgePunct+")", Pattern.UNICODE_CHARACTER_CLASS);
+    static Pattern EdgePunctRight = Pattern.compile("("+notEdgePunct+")("+edgePunct+"+)" + offEdge, Pattern.UNICODE_CHARACTER_CLASS);
 
     public static String splitEdgePunct (String input) {
         Matcher m1 = EdgePunctLeft.matcher(input);
@@ -237,8 +238,6 @@ public class Twokenize {
                 badSpans.add(new Pair<Integer, Integer>(matches.start(),matches.end()));
             }
         }
-
-        System.err.println(bads);
 
         // Create a list of indices to create the "goods", which can be
         // split. We are taking "bad" spans like 
