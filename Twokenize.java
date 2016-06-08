@@ -601,19 +601,5 @@ public class Twokenize {
           output.println(simpleSegment(rawline, tokline));
         }
       }
-      
-      //System.err.println("\n\n" + simpleSegment("So http://some.one or what.hu/s at 13.00 or, you know... 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo! Okay, that :D was fun XD xddd anyway <3 look at http://what.me or (https://s.de) for de@post.de Germans admin@post.de :'( :'-( oh well... Time @someguy: to go @man. Bye. bye. Really!? @woman Well @man!!!!! @woman #hashtag #yolo...", ""));
-      
-      /*
-      System.err.println("\n\n" + simpleSegment(
-        "itthooon:) mekkora volt Ajka úristen:D nyomatták rendesen:D végig ott voltunk ahh durva élmény:Dennyi koncertet:D Köszii Apa<3:)",
-        "itthooon : ) mekkora volt Ajka úristen:D nyomatták rendesen:D végig ott voltunk ahh durva élmény:Dennyi koncertet:D Köszii Apa < 3 : )"));
-      System.err.println("\n\n" + simpleSegment(
-        "hattttalmas őrület volt rábapatyon, istenek vagytok! :D irány ajka, 16.00-kor nyomjuk! jeaaah bóóój! #fb",
-        "hattttalmas őrület volt rábapatyon , istenek vagytok ! :D irány ajka , 16.00 - kor nyomjuk ! jeaaah bóóój ! #fb"));
-      System.err.println("\n\n" + simpleSegment(
-        "abc:Ddef:D ghi :D jkl abc:Ddef:D ghi :D jkl abc:Ddef:D ghi :D jkl",
-        "abc:Ddef:D ghi :D jk l a bc: Ddef: D ghi : D jk l a bc : D def : D ghi  : D jkl"));
-      // */
     }
 }
