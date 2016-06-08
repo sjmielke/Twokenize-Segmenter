@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.util.regex.*;
 import java.util.Arrays;
 import java.util.List;
@@ -27,7 +29,7 @@ import org.apache.commons.lang.StringEscapeUtils;
  * (3) Brendan bugfixed the Scala port and merged with POS-specific changes
  *     for the CMU ARK Twitter POS Tagger  
  * (4) Tobi Owoputi ported it back to Java and added many improvements (2012-06)
- * (5) Sebastian Mielke made it unicode-aware (2016-05)
+ * (5) Sebastian Mielke made it unicode-aware (2016-05) and taught it to segment tweets for translation (2016-06)
  * 
  * Original home is http://github.com/brendano/ark-tweet-nlp and http://www.ark.cs.cmu.edu/TweetNLP
  *
@@ -246,8 +248,7 @@ public class Twokenize {
       }
     }
 
-    private static String simpleSegment (String rawtext) {
-      StringBuilder segInstr = new StringBuilder();
+    private static List<Pair<Integer,Integer>> simpleSegmentRaw (String rawtext) {
       List<Pair<Integer,Integer>> allBadSpans = new ArrayList<Pair<Integer,Integer>>();
       
       // Get all the useful Twokenizer matches
@@ -314,22 +315,23 @@ public class Twokenize {
         if (touching)
           allBadSpans.add(growPair(p, rawtext));
       }
-      // Forward pass
+      // Forward pass (i.e. afterSep or atStart)
       String forward_regex = OR("[^\\s]*@" + OR(urlStart2, "\\w+"));
       matches = Pattern.compile(forward_regex, Pattern.UNICODE_CHARACTER_CLASS).matcher(rawtext);
       while(matches.find()){
         boolean touching = false;
-        for(Pair<Integer,Integer> p : allBadSpans) {
-          if(matches.start() <= p.second && matches.end() > p.second) {
-            touching = true;
-            break;
+        if (matches.start() == 0)
+          touching = true;
+        else
+          for(Pair<Integer,Integer> p : allBadSpans) {
+            if(matches.start() <= p.second && matches.end() > p.second) {
+              touching = true;
+              break;
+            }
           }
-        }
         if (touching)
           allBadSpans.add(growPair(new Pair<Integer, Integer>(matches.start(), matches.end()), rawtext));
       }
-      
-      //for(Pair p: allBadSpans) System.err.println("after bf " + p.first + " " + p.second);
       
       // Time for the union of all spans to get good and bad lists!
       // ... sort for the joining (next)
@@ -354,22 +356,95 @@ public class Twokenize {
         }
       }
       
-      // ... translate into indices for instruction generation!
-      List<Integer> sepIndices = new ArrayList<Integer>();
-      sepIndices.add(0);
-      for(Pair<Integer,Integer> p : allBadSpans){
-          sepIndices.add(p.first);
-          sepIndices.add(p.second);
+      return allBadSpans;
+    }
+
+    public static String simpleSegment (String rawtext_unsqueezed, String tokenized) {
+      StringBuilder segInstr = new StringBuilder();
+      String rawtext = squeezeWhitespace(rawtext_unsqueezed);
+      List<Pair<Integer,Integer>> rawSegments = simpleSegmentRaw(rawtext);
+      
+      // Idea: we thread our way through both strings,
+      // inserting "\ntext%" and "\nsep%" into the tokenized string
+      // whenever we begin/end a span in the raw string, i.e. change state
+      
+      List<Integer> stateChangeIndices = new ArrayList<Integer>();
+      for(Pair<Integer,Integer> p : rawSegments){
+          stateChangeIndices.add(p.first);
+          stateChangeIndices.add(p.second);
+      }
+      stateChangeIndices.add(rawtext.length());
+      
+      int iRaw = 0, iTok = 0;
+      boolean isSep = false;
+      boolean first = true;
+      for(int iSC : stateChangeIndices) {
+        if(iRaw == rawtext.length())
+          break;
+        if(first && stateChangeIndices.get(0) == 0) {
+          first = false;
+          isSep = !isSep;
+          continue;
+        } else
+          first = false;
+        
+        segInstr.append(isSep ? "sep\t" : "text\t");
+        boolean afterFirstNonSpace = false;
+        while(iRaw < iSC) {
+          char cTok = tokenized.charAt(iTok);
+          char cRaw = rawtext.charAt(iRaw);
+          String tok3 = (iTok < tokenized.length() - 2) ?
+                          tokenized.substring(iTok, iTok+3) :
+                        (iTok < tokenized.length() - 1) ?
+                          tokenized.substring(iTok, iTok+2) :
+                        "XX"; // won't match any of the >2 char cases.
+          String raw3 = (iRaw < rawtext.length() - 2) ?
+                          rawtext.substring(iRaw, iRaw+3) :
+                        (iRaw < rawtext.length() - 1) ?
+                          rawtext.substring(iRaw, iRaw+2) :
+                        "XX"; // won't match any of the >2 char cases.
+          if(cTok == cRaw
+              || cTok == '“' && (cRaw == '"' || cRaw == '«' || cRaw == '”')
+              || cTok == '”' && (cRaw == '"' || cRaw == '»' || cRaw == '“')
+              ) {
+            segInstr.append(cTok);
+            iRaw++;
+            iTok++;
+            afterFirstNonSpace = true;
+          } else if ((cTok == '“' || cTok == '”')
+                    && raw3.substring(0,2).equals("''")) {
+            segInstr.append(cTok);
+            iRaw += 2;
+            iTok++;
+            afterFirstNonSpace = true;
+          } else if (tok3.substring(0,2).equals("--")
+                    && (cRaw == '–' || cRaw == '—')) {
+            segInstr.append("--");
+            iRaw++;
+            iTok += 2;
+            afterFirstNonSpace = true;
+          } else if ((cTok == '…') && raw3.equals("...")) {
+            segInstr.append(cTok);
+            iRaw += 3;
+            iTok++;
+            afterFirstNonSpace = true;
+          } else if (tok3.equals("...") && (cRaw == '…')) {
+            segInstr.append("...");
+            iRaw++;
+            iTok += 3;
+            afterFirstNonSpace = true;
+          } else if (cTok == ' ') {
+            if(!isSep && afterFirstNonSpace)
+              segInstr.append(' ');
+            iTok++;
+          } else {
+            throw new RuntimeException("Unsure about cTok '"+cTok+"' and cRaw '"+cRaw+"'");
+          }
+        }
+        segInstr.append("\n");
+        isSep = !isSep;
       }
       
-      // ... finally construct the two instruction list
-      for(int a = 0; a < sepIndices.size() - 2; a += 2) {
-        if(sepIndices.get(a) < sepIndices.get(a+1))
-          segInstr.append("text%" + rawtext.substring(sepIndices.get(a), sepIndices.get(a+1)) + "\n");
-        segInstr.append("sep%" + rawtext.substring(sepIndices.get(a+1), sepIndices.get(a+2)) + "\n");
-      }
-      if(sepIndices.get(sepIndices.size() - 1) < rawtext.length())
-        segInstr.append("text%" + rawtext.substring(sepIndices.get(sepIndices.size() - 1), rawtext.length()) + "\n");
       return segInstr.toString();
     }
 
@@ -499,26 +574,46 @@ public class Twokenize {
 
     /** Tokenizes tweet texts on standard input, tokenizations on standard output.  Input and output UTF-8. */
     public static void main(String[] args) throws IOException {
+      PrintStream output = new PrintStream(System.out, true, "UTF-8");
+      // Original tokenizer behavior
+      if (args.length == 0) {
         BufferedReader input = new BufferedReader(new InputStreamReader(System.in,"UTF-8"));
-        PrintStream output = new PrintStream(System.out, true, "UTF-8");
-    	String line;
-    	while ( (line = input.readLine()) != null) {
-    		List<String> toks = tokenizeRawTweetText(line);
-    		for (int i=0; i<toks.size(); i++) {
-    			output.print(toks.get(i));
-    			if (i < toks.size()-1) {
-    				output.print(" ");
-    			}
-    		}
-        
-        System.err.print(simpleSegment(line));
-        System.err.println("break%");
-        
-    		output.print("\n");
-    	}
+        String line;
+        while ( (line = input.readLine()) != null) {
+          List<String> toks = tokenizeRawTweetText(line);
+          for (int i=0; i<toks.size(); i++) {
+            output.print(toks.get(i));
+            if (i < toks.size()-1) {
+              output.print(" ");
+            }
+          }
+        }
+        output.print("\n");
+      }
+      else if (args.length == 2) { // new segmentation behavior
+        BufferedReader raw = new BufferedReader(new InputStreamReader(
+          new FileInputStream(new File(args[0])), "UTF-8"));
+        BufferedReader tok = new BufferedReader(new InputStreamReader(
+          new FileInputStream(new File(args[1])), "UTF-8"));
+        String rawline, tokline;
+        while ( (rawline = raw.readLine()) != null
+                && (tokline = tok.readLine()) != null) {
+          output.println(simpleSegment(rawline, tokline));
+        }
+      }
       
-      System.err.println("\n\n" + simpleSegment("So http://some.one or what.hu/s at 13.00 or, you know... 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo! Okay, that :D was fun XD xddd anyway <3 look at http://what.me or (https://s.de) for de@post.de Germans admin@post.de :'( :'-( oh well... Time @someguy: to go @man. Bye. bye. Really!? @woman Well @man!!!!! @woman #hashtag #yolo..."));
+      //System.err.println("\n\n" + simpleSegment("So http://some.one or what.hu/s at 13.00 or, you know... 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo! Okay, that :D was fun XD xddd anyway <3 look at http://what.me or (https://s.de) for de@post.de Germans admin@post.de :'( :'-( oh well... Time @someguy: to go @man. Bye. bye. Really!? @woman Well @man!!!!! @woman #hashtag #yolo...", ""));
       
-      System.err.println("\n\n" + simpleSegment("hattttalmas őrület volt rábapatyon, istenek vagytok! :D irány ajka, 16.00-kor nyomjuk! jeaaah bóóój! #fb"));
+      /*
+      System.err.println("\n\n" + simpleSegment(
+        "itthooon:) mekkora volt Ajka úristen:D nyomatták rendesen:D végig ott voltunk ahh durva élmény:Dennyi koncertet:D Köszii Apa<3:)",
+        "itthooon : ) mekkora volt Ajka úristen:D nyomatták rendesen:D végig ott voltunk ahh durva élmény:Dennyi koncertet:D Köszii Apa < 3 : )"));
+      System.err.println("\n\n" + simpleSegment(
+        "hattttalmas őrület volt rábapatyon, istenek vagytok! :D irány ajka, 16.00-kor nyomjuk! jeaaah bóóój! #fb",
+        "hattttalmas őrület volt rábapatyon , istenek vagytok ! :D irány ajka , 16.00 - kor nyomjuk ! jeaaah bóóój ! #fb"));
+      System.err.println("\n\n" + simpleSegment(
+        "abc:Ddef:D ghi :D jkl abc:Ddef:D ghi :D jkl abc:Ddef:D ghi :D jkl",
+        "abc:Ddef:D ghi :D jk l a bc: Ddef: D ghi : D jk l a bc : D def : D ghi  : D jkl"));
+      // */
     }
 }
