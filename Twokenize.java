@@ -181,6 +181,22 @@ public class Twokenize {
                     AtMention
             ), Pattern.UNICODE_CHARACTER_CLASS);
 
+    // We don't want to define our segments using these
+    static Pattern UnwantedProtected = Pattern.compile(
+            OR(
+                    url,
+                    Email,
+                    timeLike,
+                    numberWithCommas,
+                    numComb,
+                    entity,
+                    punctSeq,
+                    arbitraryAbbrev,
+                    embeddedApostrophe,
+                    Hashtag,  
+                    AtMention
+            ), Pattern.UNICODE_CHARACTER_CLASS);
+
     // Edge punctuation
     // Want: 'foo' => ' foo '
     // While also:   don't => don't
@@ -209,6 +225,28 @@ public class Twokenize {
         public T1 first;
         public T2 second;
         public Pair(T1 x, T2 y) { first=x; second=y; }
+    }
+
+    private static String simpleSegment (String text) {
+      StringBuilder segInstr = new StringBuilder();
+      // Get all the useful Twokenizer matches
+      Matcher matches = Protected.matcher(text);
+      List<Pair<Integer,Integer>> segSepSpans = new ArrayList<Pair<Integer,Integer>>();
+      while(matches.find()){
+        if (matches.start() != matches.end()){ //unnecessary?
+          String prot = text.substring(matches.start(), matches.end());
+          if(!UnwantedProtected.matcher(prot).matches()) {
+            System.err.println(prot + " from " + matches.start() + " to " + matches.end());
+            segSepSpans.add(new Pair<Integer, Integer>(matches.start(), matches.end()));
+          } else {
+            System.err.println("/not/ " + prot + " from " + matches.start() + " to " + matches.end());
+          }
+        }
+      }
+      
+      for(Pair<Integer, Integer> p : segSepSpans)
+        segInstr.append("sep\t" + text.substring(p.first, p.second) + "\n");
+      return segInstr.toString();
     }
 
     // The main work of tokenizing a tweet.
@@ -350,6 +388,7 @@ public class Twokenize {
     		}
     		output.print("\n");
     	}
+      
+      System.err.println("\n\n" + simpleSegment("So at 13.00 or 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo!"));
     }
-    
 }
