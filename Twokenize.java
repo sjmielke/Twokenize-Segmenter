@@ -8,6 +8,7 @@ import java.util.regex.*;
 import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Comparator;
 
 import org.apache.commons.lang.StringEscapeUtils;
 
@@ -184,7 +185,7 @@ public class Twokenize {
     // We don't want to define our segments using these
     static Pattern UnwantedProtected = Pattern.compile(
             OR(
-                    url,
+                    url, // <- that one is really worth dicussing, but I actually prefer only matching the http/s:// stuff manually, naked URLs are more likely part of a sentence
                     Email,
                     timeLike,
                     numberWithCommas,
@@ -227,25 +228,148 @@ public class Twokenize {
         public Pair(T1 x, T2 y) { first=x; second=y; }
     }
 
-    private static String simpleSegment (String text) {
+    private static Pair<Integer, Integer> growPair (Pair<Integer, Integer> p, String rawtext) {
+      // grow left
+      while (p.first > 0
+              && Whitespace.matcher(rawtext.substring(p.first-1, p.first)).matches())
+        p.first--;
+      // grow right
+      while (p.second < rawtext.length() - 1
+              && Whitespace.matcher(rawtext.substring(p.second, p.second+1)).matches())
+        p.second++;
+      return p;
+    }
+
+    private static void growOverWhitespace (List<Pair<Integer,Integer>> allBadSpans, String rawtext) {
+      for (Pair<Integer,Integer> p : allBadSpans) {
+        growPair(p, rawtext);
+      }
+    }
+
+    private static String simpleSegment (String rawtext) {
       StringBuilder segInstr = new StringBuilder();
+      List<Pair<Integer,Integer>> allBadSpans = new ArrayList<Pair<Integer,Integer>>();
+      
       // Get all the useful Twokenizer matches
-      Matcher matches = Protected.matcher(text);
-      List<Pair<Integer,Integer>> segSepSpans = new ArrayList<Pair<Integer,Integer>>();
+      Matcher matches = Protected.matcher(rawtext);
       while(matches.find()){
         if (matches.start() != matches.end()){ //unnecessary?
-          String prot = text.substring(matches.start(), matches.end());
-          if(!UnwantedProtected.matcher(prot).matches()) {
-            System.err.println(prot + " from " + matches.start() + " to " + matches.end());
-            segSepSpans.add(new Pair<Integer, Integer>(matches.start(), matches.end()));
-          } else {
-            System.err.println("/not/ " + prot + " from " + matches.start() + " to " + matches.end());
-          }
+          String prot = rawtext.substring(matches.start(), matches.end());
+          if(!UnwantedProtected.matcher(prot).matches())
+            allBadSpans.add(new Pair<Integer, Integer>(matches.start(), matches.end()));
         }
       }
       
-      for(Pair<Integer, Integer> p : segSepSpans)
-        segInstr.append("sep\t" + text.substring(p.first, p.second) + "\n");
+      // Okay, first my easy own protections:
+      String easy_regex = OR("@[\\w]+:", "\\(?https?://[^\\s]+", ":'-?\\(+", "8D+", "[xX][dD]+", "\\.\\.+");
+      matches = Pattern.compile(easy_regex, Pattern.UNICODE_CHARACTER_CLASS).matcher(rawtext);
+      while(matches.find()){
+        allBadSpans.add(new Pair<Integer, Integer>(matches.start(), matches.end()));
+      }
+      
+      // Then the tricky sentence boundaries:
+      String bound_regex = OR("(\\.)\\s+[\\p{Lu}\\p{Lt}]", "[!\\?]+");
+      matches = Pattern.compile(bound_regex, Pattern.UNICODE_CHARACTER_CLASS).matcher(rawtext);
+      // Here we have to shift the sep start one to the right to include it in
+      // previous text!
+      // Following punctuation can be part of the separator.
+      while(matches.find()){
+        String prot = rawtext.substring(matches.start(), matches.end());
+        // I want the whole "!?" to be presented to the translator
+        if(prot.length() >= 2 && prot.substring(0,2).equals("!?"))
+          allBadSpans.add(new Pair<Integer, Integer>(matches.start() + 2, matches.end()));
+        // The full stop captures the following capital letter, so draw end closer
+        else if (prot.substring(0,1).equals("."))
+          allBadSpans.add(new Pair<Integer, Integer>(matches.start() + 1, matches.end() - 1));
+        // Otherwise really just exclude one punctuation mark from the separator
+        else
+          allBadSpans.add(new Pair<Integer, Integer>(matches.start() + 1, matches.end()));
+      }
+      
+      // Now for my stupidly context-sensitive one, but they're only necessarily
+      // context-sensitive in one direction, so by doing a forward and a
+      // backward pass, we should catch 'em all!
+      growOverWhitespace(allBadSpans, rawtext);
+      
+      // Backward pass (i.e. beforeSep or atEnd)
+      String backward_regex = OR("[^\\s]*@" + OR(urlStart2, "\\w+"), "#[\\w]+");
+      matches = Pattern.compile(backward_regex, Pattern.UNICODE_CHARACTER_CLASS).matcher(rawtext);
+      // (going backwards is tricky, so cache all matches)
+      List<Pair<Integer,Integer>> candidates = new ArrayList<>();
+      while(matches.find()) {
+        candidates.add(new Pair(matches.start(), matches.end()));
+      }
+      for(int i = candidates.size() - 1; i >= 0; i--) {
+        Pair<Integer,Integer> p = candidates.get(i);
+        boolean touching = false;
+        if (p.second == rawtext.length())
+          touching = true;
+        else
+          for(Pair<Integer,Integer> p_done : allBadSpans) {
+            if(p.second >= p_done.first && p.first < p_done.first) {
+              touching = true;
+              break;
+            }
+          }
+        if (touching)
+          allBadSpans.add(growPair(p, rawtext));
+      }
+      // Forward pass
+      String forward_regex = OR("[^\\s]*@" + OR(urlStart2, "\\w+"));
+      matches = Pattern.compile(forward_regex, Pattern.UNICODE_CHARACTER_CLASS).matcher(rawtext);
+      while(matches.find()){
+        boolean touching = false;
+        for(Pair<Integer,Integer> p : allBadSpans) {
+          if(matches.start() <= p.second && matches.end() > p.second) {
+            touching = true;
+            break;
+          }
+        }
+        if (touching)
+          allBadSpans.add(growPair(new Pair<Integer, Integer>(matches.start(), matches.end()), rawtext));
+      }
+      
+      //for(Pair p: allBadSpans) System.err.println("after bf " + p.first + " " + p.second);
+      
+      // Time for the union of all spans to get good and bad lists!
+      // ... sort for the joining (next)
+      allBadSpans.sort(new Comparator<Pair<Integer, Integer>>() {
+        @Override
+        public int compare(Pair<Integer, Integer> o1, Pair<Integer, Integer> o2) {
+          if(o1.first != o2.first)
+            return o1.first.compareTo(o2.first);
+          else
+            return o1.second.compareTo(o2.second);
+        }
+      });
+      
+      // ... join adjacent sep ranges
+      int i = 0;
+      while (i < allBadSpans.size() - 1) {
+        if(allBadSpans.get(i).second >= allBadSpans.get(i+1).first) {
+          allBadSpans.get(i).second = allBadSpans.get(i+1).second;
+          allBadSpans.remove(i+1);
+        } else {
+          i++;
+        }
+      }
+      
+      // ... translate into indices for instruction generation!
+      List<Integer> sepIndices = new ArrayList<Integer>();
+      sepIndices.add(0);
+      for(Pair<Integer,Integer> p : allBadSpans){
+          sepIndices.add(p.first);
+          sepIndices.add(p.second);
+      }
+      
+      // ... finally construct the two instruction list
+      for(int a = 0; a < sepIndices.size() - 2; a += 2) {
+        if(sepIndices.get(a) < sepIndices.get(a+1))
+          segInstr.append("text%" + rawtext.substring(sepIndices.get(a), sepIndices.get(a+1)) + "\n");
+        segInstr.append("sep%" + rawtext.substring(sepIndices.get(a+1), sepIndices.get(a+2)) + "\n");
+      }
+      if(sepIndices.get(sepIndices.size() - 1) < rawtext.length())
+        segInstr.append("text%" + rawtext.substring(sepIndices.get(sepIndices.size() - 1), rawtext.length()) + "\n");
       return segInstr.toString();
     }
 
@@ -386,9 +510,15 @@ public class Twokenize {
     				output.print(" ");
     			}
     		}
+        
+        System.err.print(simpleSegment(line));
+        System.err.println("break%");
+        
     		output.print("\n");
     	}
       
-      System.err.println("\n\n" + simpleSegment("So at 13.00 or 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo!"));
+      System.err.println("\n\n" + simpleSegment("So http://some.one or what.hu/s at 13.00 or, you know... 13:00 \"his highness\" said xD 420.00€ and :))) $13.00 for 100% - no [: 100.01% - yeah #yolo! Okay, that :D was fun XD xddd anyway <3 look at http://what.me or (https://s.de) for de@post.de Germans admin@post.de :'( :'-( oh well... Time @someguy: to go @man. Bye. bye. Really!? @woman Well @man!!!!! @woman #hashtag #yolo..."));
+      
+      System.err.println("\n\n" + simpleSegment("hattttalmas őrület volt rábapatyon, istenek vagytok! :D irány ajka, 16.00-kor nyomjuk! jeaaah bóóój! #fb"));
     }
 }
